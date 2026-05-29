@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+// --- Interfaccia per la Cross-Contract Communication ---
+interface IMedChainGovernance {
+    function whitelistedIdentityAuthorities(address _authority) external view returns (bool);
+}
+
 /**
- * @title MedChainVault
- * @dev Proof of Concept for the MedChain Document Vault & Master Smart Contract.
- * Implements plaintext ACT management, bypassing ZKP for rapid prototyping.
+ * @title MedChainVault (MSC)
+ * @dev Master Smart Contract & Document Vault.
+ * Implements plaintext ACT management and cascading revocation.
  */
 contract MedChainVault {
-
-    // --- Enums & Structs ---
 
     enum DocStatus { Created, Archived, Revoked }
     enum PermissionType { READ, WRITE }
@@ -19,13 +22,13 @@ contract MedChainVault {
         bytes32 version;
         bytes seal;
         bytes signature;
-        address owner; // Represents the Patient's DID
+        address owner; 
     }
 
     struct ACT {
         bytes32 tokenId;
         address ownerDid;
-        bytes32 targetBlindedId; // Binding the ACT to a specific document
+        bytes32 targetBlindedId; 
         PermissionType permType;
         uint256 expirationTimestamp;
         bool delegatable;
@@ -33,189 +36,111 @@ contract MedChainVault {
         uint256 delegationDepth;
     }
 
-    // --- State Variables ---
-
-    // The Document Vault mapping BlindedID to DocumentRecord
     mapping(bytes32 => DocumentRecord) public vault;
-    
-    // The ACT Registry mapping tokenId to ACT
     mapping(bytes32 => ACT) public acts;
-    
-    // Spent nonce registry for replay protection
-    mapping(bytes32 => bool) public spentNonces;
-    
-    // Revocation registry
     mapping(bytes32 => bool) public revokedTokens;
-    
-    // Mocking the Identity Authority Bitstring Status List
-    mapping(address => bool) public isIdentityRevoked;
 
-    // --- Events ---
+    // Puntatore al Governance Contract
+    IMedChainGovernance public governanceContract;
 
     event DocumentRegistered(bytes32 indexed blindedId, string cid);
-    event ACTMinted(bytes32 indexed tokenId, address indexed ownerDid, PermissionType permType, uint256 expirationTimestamp);
-    event TokenRevoked(bytes32 indexed tokenId);
+    event ActMinted(bytes32 indexed tokenId, bytes32 indexed targetBlindedId, address ownerDid);
     event AccessAuthorized(bytes32 indexed requestHash);
+    event TokenRevoked(bytes32 indexed tokenId);
 
-    // --- Modifiers ---
-
-    modifier onlyValidIdentity(address _did) {
-        require(!isIdentityRevoked[_did], "Identity is revoked by Authority");
+    // Il modificatore che "telefona" al GSC per verificare l'identità
+    modifier onlyValidIdentity(address _caller) {
+        require(governanceContract.whitelistedIdentityAuthorities(_caller) == true, 
+                "Identity revoked or not whitelisted by Governance");
         _;
     }
 
-    // --- Document Management ---
+    // Al momento del deploy, colleghiamo il MSC al GSC
+    constructor(address _governanceAddress) {
+        governanceContract = IMedChainGovernance(_governanceAddress);
+    }
 
-    /**
-     * @dev Issues a new document into the vault.
-     */
-    function issueDocument(
-        bytes32 _blindedId,
-        string calldata _cid,
-        bytes calldata _seal,
-        bytes calldata _signature
-    ) external onlyValidIdentity(msg.sender) {
-        require(bytes(vault[_blindedId].cid).length == 0, "Document already exists");
+    // --- Core Functions ---
 
+    function registerDocument(bytes32 _blindedId, string memory _cid, bytes memory _seal, bytes memory _signature) external onlyValidIdentity(msg.sender) {
+        require(vault[_blindedId].owner == address(0), "Document already exists");
+        
         vault[_blindedId] = DocumentRecord({
             cid: _cid,
             status: DocStatus.Created,
-            version: bytes32(0),
+            version: bytes32(uint256(1)),
             seal: _seal,
             signature: _signature,
             owner: msg.sender
         });
-
+        
         emit DocumentRegistered(_blindedId, _cid);
     }
 
-    // --- Access Control & Delegation ---
-
-    /**
-     * @dev Mints a root ACT. Can only be called by the document owner.
-     */
-    function mintRootACT(
-        bytes32 _tokenId,
-        bytes32 _targetBlindedId,
-        address _granteeDid,
-        PermissionType _permType,
-        uint256 _expiration,
-        bool _delegatable,
-        bytes32 _nonce
-    ) external onlyValidIdentity(msg.sender) {
-        require(vault[_targetBlindedId].owner == msg.sender, "Only owner can mint root ACT");
-        require(!spentNonces[_nonce], "Nonce already spent");
-        require(acts[_tokenId].ownerDid == address(0), "Token ID already exists");
-        require(_expiration > block.timestamp, "Expiration must be in the future");
-
-        spentNonces[_nonce] = true;
-
+    function mintRootAct(bytes32 _tokenId, bytes32 _blindedId, uint256 _expiration) external onlyValidIdentity(msg.sender) {
+        require(vault[_blindedId].owner == msg.sender, "Only document owner can mint root ACT");
+        
         acts[_tokenId] = ACT({
             tokenId: _tokenId,
-            ownerDid: _granteeDid,
-            targetBlindedId: _targetBlindedId,
-            permType: _permType,
+            ownerDid: msg.sender,
+            targetBlindedId: _blindedId,
+            permType: PermissionType.WRITE,
             expirationTimestamp: _expiration,
-            delegatable: _delegatable,
+            delegatable: true,
             parentTokenId: bytes32(0),
             delegationDepth: 0
         });
-
-        emit ACTMinted(_tokenId, _granteeDid, _permType, _expiration);
+        
+        emit ActMinted(_tokenId, _blindedId, msg.sender);
     }
 
-    /**
-     * @dev Sub-delegates an existing ACT. Enforces scope containment in plaintext.
-     */
-    function delegateACT(
-        bytes32 _childTokenId,
-        bytes32 _parentTokenId,
-        address _granteeDid,
-        PermissionType _childPermType,
-        uint256 _childExpiration,
-        bool _childDelegatable,
-        bytes32 _nonce
-    ) external onlyValidIdentity(msg.sender) {
+    function delegateAccess(bytes32 _parentTokenId, bytes32 _newTokenId, address _delegatee, PermissionType _perm, uint256 _expiration) external onlyValidIdentity(msg.sender) {
         ACT memory parent = acts[_parentTokenId];
+        require(parent.ownerDid == msg.sender, "Not the parent token owner");
+        require(parent.delegatable == true, "Parent token is not delegatable");
         
-        require(parent.ownerDid == msg.sender, "Not authorized to delegate this parent token");
-        require(parent.delegatable, "Parent token is not delegatable");
-        require(!revokedTokens[_parentTokenId], "Parent token is revoked");
-        require(parent.expirationTimestamp >= block.timestamp, "Parent token expired");
+        // Difesa contro il DoS del Gas (WP3)
+        require(parent.delegationDepth < 3, "Max delegation depth reached"); 
         
-        // Scope Containment Checks
-        require(_childExpiration <= parent.expirationTimestamp, "Child expiration exceeds parent");
-        if (parent.permType == PermissionType.READ) {
-            require(_childPermType == PermissionType.READ, "Cannot escalate READ to WRITE");
-        }
-        
-        require(!spentNonces[_nonce], "Nonce already spent");
-        require(acts[_childTokenId].ownerDid == address(0), "Child Token ID already exists");
+        // Verifica l'integrità della catena prima di permettere una delega
+        require(checkChainIntegrity(_parentTokenId), "Parent chain is invalid, expired or revoked");
 
-        spentNonces[_nonce] = true;
-
-        acts[_childTokenId] = ACT({
-            tokenId: _childTokenId,
-            ownerDid: _granteeDid,
+        acts[_newTokenId] = ACT({
+            tokenId: _newTokenId,
+            ownerDid: _delegatee,
             targetBlindedId: parent.targetBlindedId,
-            permType: _childPermType,
-            expirationTimestamp: _childExpiration,
-            delegatable: _childDelegatable,
+            permType: _perm,
+            expirationTimestamp: _expiration,
+            delegatable: true,
             parentTokenId: _parentTokenId,
             delegationDepth: parent.delegationDepth + 1
         });
-
-        emit ACTMinted(_childTokenId, _granteeDid, _childPermType, _childExpiration);
+        
+        emit ActMinted(_newTokenId, parent.targetBlindedId, _delegatee);
     }
 
-    /**
-     * @dev Revokes an ACT. In this plaintext POC, we target the tokenId directly.
-     */
-    function revokeACT(bytes32 _tokenId) external {
-        ACT memory token = acts[_tokenId];
-        require(token.ownerDid != address(0), "Token does not exist");
-        
-        // Only the patient/owner or the direct delegator can revoke
-        require(
-            msg.sender == vault[token.targetBlindedId].owner || 
-            msg.sender == acts[token.parentTokenId].ownerDid,
-            "Not authorized to revoke"
-        );
-
+    function revokeToken(bytes32 _tokenId) external onlyValidIdentity(msg.sender) {
+        // Può revocare il possessore del token, o il proprietario originale del documento
+        require(acts[_tokenId].ownerDid == msg.sender || vault[acts[_tokenId].targetBlindedId].owner == msg.sender, "Not authorized to revoke");
         revokedTokens[_tokenId] = true;
+        
         emit TokenRevoked(_tokenId);
     }
 
-    // --- Policy Enforcement Point (PEP) ---
-
-    /**
-     * @dev Evaluates the 5-step access pipeline.
-     */
-    function authorizeAccess(
-        bytes32 _tokenId,
-        bytes32 _targetBlindedId,
-        PermissionType _requestedPerm,
-        bytes32 _requestHash
-    ) external onlyValidIdentity(msg.sender) returns (bool) {
+    function authorizeAccess(bytes32 _tokenId, bytes32 _targetBlindedId, PermissionType _requestedPerm, bytes32 _requestHash) external onlyValidIdentity(msg.sender) returns (bool) {
         ACT memory token = acts[_tokenId];
-        
-        // 1 & 2. Existence & Ownership Check
         require(token.ownerDid == msg.sender, "Caller does not own this token");
-        require(token.targetBlindedId == _targetBlindedId, "Token does not grant access to this document");
+        require(token.targetBlindedId == _targetBlindedId, "Token mismatch");
+        require(uint8(token.permType) >= uint8(_requestedPerm), "Insufficient permission");
         
-        // 3. Permission Type Check
-        require(uint8(token.permType) >= uint8(_requestedPerm), "Insufficient permission type");
-
-        // 4 & 5. Lifecycle and Chain Integrity Check
-        require(checkChainIntegrity(_tokenId), "Delegation chain is invalid, expired, or revoked");
+        // La Revoca a Cascata (WP2/WP3)
+        require(checkChainIntegrity(_tokenId), "Delegation chain invalid, expired, or revoked");
 
         emit AccessAuthorized(_requestHash);
         return true;
     }
 
-    /**
-     * @dev Recursively traverses the delegation graph upward to ensure no ancestor is revoked or expired.
-     */
+    // --- Internal Logic ---
     function checkChainIntegrity(bytes32 _tokenId) internal view returns (bool) {
         bytes32 currentToken = _tokenId;
         
