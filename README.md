@@ -1,78 +1,41 @@
-Questo progetto implementa un sistema basato su blockchain per la gestione sicura dei documenti medici e il controllo degli accessi. Il sistema si basa su due smart contract principali e include una suite di test completa.
+This project implements a blockchain-based system for the secure management of medical documents and access control. The system relies on two main smart contracts and includes a comprehensive test suite.
 
+## Contract Architecture
 
-Architettura dei Contratti
+The system consists of two smart contracts written in Solidity:
 
-Il sistema è composto da due smart contract scritti in Solidity:
+### MedChainGovernance (GSC)
 
-1. MedChainGovernance (GSC)
+* It is an M-of-N governance contract.
+* Manages the consortium authorities (validators) and the "Break-Glass" emergency protocol.
+* Allows validators to submit and sign proposals to add (whitelist) identity authorities.
+* Handles emergency data access requests, requiring a specific signature threshold (e.g., 2 out of 3) for approval.
 
-* È un contratto di governance di tipo M-of-N.
+### MedChainVault (MSC)
 
+* Acts as the Master Smart Contract and Document Vault.
+* Handles the management of Access Control Tokens (ACT) and the implementation of cascading revocation.
+* Interacts with the governance contract to verify that the caller's identity is valid and whitelisted.
+* Allows document owners to register records (with CID, seal, and signature) and mint "Root ACTs" to delegate access.
 
-* Gestisce le autorità del consorzio (validatori) e il protocollo di emergenza "Break-Glass".
+## Key Security Features
 
+* **Granular Access Control:** Supports specific `READ` and `WRITE` permissions for tokens.
+* **Gas DoS Prevention:** The maximum access delegation depth is strictly limited to 3 to prevent Denial of Service attacks related to gas consumption.
+* **Chain Integrity:** Whenever access is delegated or authorized, the contract verifies the entire token chain to ensure no parent node is expired or revoked.
+* **Cascading Revocation:** Revoking a token automatically invalidates all tokens derived from it.
 
-* Permette ai validatori di inviare e firmare proposte per aggiungere (whitelisting) le autorità di identità.
+## Testing
 
+The test suite is written in TypeScript using the Node.js test runner (`node:test`), Hardhat, and Viem.
 
-* Gestisce le richieste di accesso di emergenza ai dati, richiedendo il raggiungimento di una soglia di firme specifica (es. 2 su 3) per l'approvazione.
+The tests cover the following critical areas:
 
-
-
-2. MedChainVault (MSC)
-
-* Funge da Master Smart Contract e archivio dei documenti (Document Vault).
-
-
-* Si occupa della gestione degli Access Control Token (ACT) e dell'implementazione della revoca a cascata.
-
-
-* Interagisce con il contratto di governance per verificare che l'identità di chi chiama le funzioni sia valida e presente nella whitelist.
-
-
-* Consente ai proprietari dei documenti di registrare record (con CID, sigillo e firma) e di emettere "Root ACT" per delegare l'accesso.
-
-
-
-Caratteristiche Principali di Sicurezza
-
-* Controllo degli Accessi Granulare: Supporta permessi specifici di tipo `READ` e `WRITE` per i token.
-
-
-* Prevenzione DoS sul Gas: La profondità massima della delega degli accessi è strettamente limitata a 3 per evitare attacchi di tipo Denial of Service legati al consumo di Gas.
-
-
-* Integrità della Catena: Ogni volta che si delega o si autorizza un accesso, il contratto verifica l'intera catena del token per assicurarsi che nessun nodo genitore sia scaduto o revocato.
-
-
-* Revoca a Cascata: La revoca di un token invalida automaticamente tutti i token derivati da esso.
-
-
-
-Testing
-
-La suite di test è scritta in TypeScript utilizzando il test runner di Node.js (`node:test`), Hardhat e Viem.
-
-I test coprono le seguenti aree critiche:
-
-* Protocollo di Governance: Verifica l'inserimento in whitelist di medici e pazienti al raggiungimento della soglia richiesta.
-
-
-* Gestione Documenti e ACT: Testa la registrazione sicura dei documenti, la creazione dei token, la delega e la revoca a cascata verificando i consumi di gas.
-
-
-Casi Limite (Edge Cases):
-* Approvazione degli accessi di emergenza (Break-Glass).
-
-
-* Prevenzione del superamento del limite di profondità per le deleghe.
-
-
-* Blocco dei tentativi di revoca da parte di utenti non autorizzati.
-
-
-* Blocco dei tentativi di escalazione dei privilegi (es. usare un token `READ` per autorizzare un'operazione di `WRITE`).
-
-
-* Rifiuto di token scaduti o revocati.
+* **Governance Protocol:** Verifies the whitelisting of doctors and patients upon reaching the required threshold.
+* **Document & ACT Management:** Tests the secure registration of documents, token minting, delegation, and cascading revocation while verifying gas consumption.
+* **Edge Cases:**
+* Emergency access approval (Break-Glass).
+* Prevention of exceeding the delegation depth limit.
+* Blocking revocation attempts by unauthorized users.
+* Blocking privilege escalation attempts (e.g., using a `READ` token to authorize a `WRITE` operation).
+* Rejection of expired or revoked tokens.
